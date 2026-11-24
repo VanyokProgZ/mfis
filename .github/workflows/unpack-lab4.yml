@@ -1,0 +1,59 @@
+name: Unpack laboratory report
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/unpack-lab4.yml'
+      - 'mfis_lab4.zip'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Validate and unpack the approved archive
+        shell: python
+        run: |
+          from pathlib import Path
+          import subprocess
+          import zipfile
+          expected_sha = '416085542e461e496504ae43a4e219a53341dfbb'
+          actual_sha = subprocess.check_output(['git', 'hash-object', 'mfis_lab4.zip'], text=True).strip()
+          if actual_sha != expected_sha:
+              raise SystemExit('Archive changed; review the new archive before extraction.')
+          expected = {
+              'README.md', 'report.tex', 'experiment.py', 'requirements.txt',
+              'coefficients.csv', 'errors.csv', 'validation.json',
+              'figures/approximations.png', 'figures/bessel.png',
+              'figures/errors.png', 'figures/legendre.png',
+          }
+          with zipfile.ZipFile('mfis_lab4.zip') as archive:
+              members = archive.infolist()
+              approved = {'mfis_lab4/' + name for name in expected}
+              if len(members) != len(approved) or {m.filename for m in members} != approved:
+                  raise SystemExit('Unexpected archive contents; refusing to extract.')
+              if sum(m.file_size for m in members) > 5000000:
+                  raise SystemExit('Unexpected uncompressed archive size.')
+              for member in members:
+                  target = Path(member.filename)
+                  if target.is_symlink() or any(p.is_symlink() for p in target.parents):
+                      raise SystemExit('Refusing to write through a symlink.')
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(member))
+      - name: Commit extracted report files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- mfis_lab4/
+          if git diff --cached --quiet; then
+            echo 'Report files already match the archive.'
+            exit 0
+          fi
+          git commit -m 'docs: add LaTeX laboratory report, figures and reproducible experiment'
+          git push origin HEAD:main

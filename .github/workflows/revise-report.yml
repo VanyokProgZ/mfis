@@ -1,0 +1,102 @@
+name: Revise and verify laboratory report
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/revise-report.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  revise:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Apply the approved report edits
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import subprocess
+          path = Path('mfis_lab4/report.tex')
+          expected_sha = 'fc0afe7d6c74ab621c02666e6aaceefba3b1f690'
+          actual_sha = subprocess.check_output(['git', 'hash-object', str(path)], text=True).strip()
+          if actual_sha != expected_sha:
+              raise SystemExit('Report changed since review. Refusing to overwrite it.')
+          text = path.read_text(encoding='utf-8')
+          start = text.index(r'\section*{Цель работы}')
+          end = text.index(r'\section{Функции Бесселя}', start)
+          introduction = r'''\tableofcontents
+          \clearpage
+          \section*{Цель работы}
+          \addcontentsline{toc}{section}{Цель работы}
+          Изучить функции Бесселя и многочлены Лежандра как собственные функции краевых задач и применить разложения по ним к решению задач о колебаниях. Сравнить точность конечных разложений по разным ортонормированным системам.
+
+          \paragraph{Постановка задачи.}
+          \begin{enumerate}
+          \item Найти фундаментальную систему решений уравнения Бесселя, получить рекуррентные и асимптотические формулы.
+          \item Найти собственные значения и собственные функции стандартных краевых задач Бесселя, Лежандра и присоединённого уравнения Лежандра. Обосновать основные спектральные свойства и вычислить квадраты норм собственных функций.
+          \item Получить производящую функцию и рекуррентные формулы многочленов Лежандра. Построить графики функций $J_0$, $J_1$, $Y_0$, $Y_1$, многочленов $P_n$ и присоединённых функций $P_n^m$ при $1\le n\le5$ и $0\le m\le n$.
+          \item Записать разложения по функциям Бесселя и многочленам Лежандра и рассмотреть их сходимость.
+          \item Поставить и решить задачи о свободных колебаниях тяжёлой нити и малых поперечных колебаниях вращающейся струны при произвольных допустимых начальных отклонениях и скоростях.
+          \item Для функций $e^t$, $|t-0.4|$ и $(1-t)e^{-8t}$ на $[0,1]$ построить приближения по $N=10$ функциям бесселевой, лежандровой и косинусной систем. Вычислить ошибки в одной норме $L^2(0,1)$ и объяснить различия в точности.
+          \end{enumerate}
+
+          '''
+          text = text[:start] + introduction + text[end:]
+          text = text.replace(r'В соответствии с лекцией 20 \cite{lectures} используем уравнение', r'Рассмотрим уравнение Бесселя порядка $\nu$')
+          text = text.replace(r'В листе задания \cite{task}', 'В листе задания')
+          text = text.replace(', как в лекциях.', '.')
+          text = text.replace(r'Используем схему лекции 15 \cite{lectures}' + chr(59) + ' на вырожденных концах вместо обычного краевого условия требуется ограниченность.', 'На вырожденных концах вместо обычного краевого условия требуется ограниченность.')
+          conclusion = text.index(r'\section*{Вывод}')
+          text = text[:conclusion].rstrip() + '\n\n' + r'\end{document}' + '\n'
+          text = re.sub(re.escape(chr(59)) + r'\s*([а-яёa-z])', lambda m: '. ' + m.group(1).upper(), text)
+          text = text.replace(chr(59), '.')
+          labels = re.findall(r'\\label\{([^}]+)\}', text)
+          refs = re.findall(r'\\(?:eqref|ref|autoref)\{([^}]+)\}', text)
+          if len(labels) != len(set(labels)) or set(refs) - set(labels):
+              raise SystemExit('Duplicate labels or unresolved reference targets.')
+          if re.search(r'лекци|\\cite|\\bibitem|thebibliography', text, re.IGNORECASE):
+              raise SystemExit('An unwanted source reference remains.')
+          if chr(59) in text or r'\section*{Вывод}' in text:
+              raise SystemExit('An unwanted punctuation mark or conclusion remains.')
+          if r'\tableofcontents' not in text:
+              raise SystemExit('Table of contents is missing.')
+          path.write_text(text, encoding='utf-8')
+      - name: Install the LaTeX build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends texlive-latex-extra texlive-lang-cyrillic cm-super latexmk
+      - name: Build PDF until references and contents stabilize
+        working-directory: mfis_lab4
+        run: latexmk -pdf -interaction=nonstopmode -halt-on-error -file-line-error report.tex
+      - name: Verify the final compilation log
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          log = Path('mfis_lab4/report.log').read_text(encoding='utf-8', errors='replace')
+          patterns = [r'(?:Reference|Citation).*undefined', r'There were undefined references', r'multiply defined', r'Label\(s\) may have changed']
+          if any(re.search(p, log, re.IGNORECASE) for p in patterns):
+              raise SystemExit('References did not resolve in the final LaTeX run.')
+          pdf = Path('mfis_lab4/report.pdf')
+          if not pdf.is_file() or pdf.stat().st_size == 0:
+              raise SystemExit('The PDF was not generated.')
+      - name: Commit the verified source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- mfis_lab4/report.tex
+          git commit -m 'docs: revise purpose, add contents and remove source citations and conclusion'
+          git push origin HEAD:main
+      - name: Publish PDF and compilation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab4-report-build
+          path: |
+            mfis_lab4/report.pdf
+            mfis_lab4/report.log
+          if-no-files-found: warn
